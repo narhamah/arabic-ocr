@@ -1,0 +1,41 @@
+[project]
+name = "arabic-ocr"
+version = "0.1.0"
+description = "High-accuracy Arabic OCR pipeline for scanned PDFs"
+requires-python = ">=3.10"
+dependencies = [
+    "pymupdf>=1.24",
+    "Pillow>=10.0",
+    "opencv-contrib-python>=4.8",
+    "numpy>=1.24",
+    "google-generativeai>=0.8",
+    "anthropic>=0.40",
+    "click>=8.1",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+layout = ["doclayout-yolo>=0.1", "huggingface-hub>=0.20"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-mock>=3.12",
+]
+
+[project.scripts]
+arabic-ocr = "arabic_ocr.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests that require API calls or heavy computation",
+    "integration: marks integration tests",
+    "unit: marks unit tests",
+]
