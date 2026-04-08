@@ -1,9 +1,10 @@
-"""Tests for pipeline orchestrator — integration tests with mocked APIs."""
+"""Tests for pipeline orchestrator with mocked external APIs."""
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import patch, MagicMock
-from pathlib import Path
-from PIL import Image
+
 from arabic_ocr.pipeline import process_pdf
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -11,15 +12,18 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 @pytest.fixture
 def mock_ocr():
-    """Mock all external API calls."""
     with patch("arabic_ocr.ocr_engines._call_gemini") as mock_gemini, \
-         patch("arabic_ocr.verifier._call_claude_tiebreaker") as mock_claude:
+         patch("arabic_ocr.verifier._call_claude_tiebreaker") as mock_claude, \
+         patch("arabic_ocr.verifier._call_claude_page_resolver") as mock_claude_page, \
+         patch("arabic_ocr.verifier._call_openai_page_resolver") as mock_openai_page:
         mock_gemini.return_value = {
             "text": "بسم الله الرحمن الرحيم",
             "success": True,
             "error": None,
         }
-        mock_claude.return_value = None  # No tiebreaker needed for identical outputs
+        mock_claude.return_value = None
+        mock_claude_page.return_value = None
+        mock_openai_page.return_value = None
         yield {"gemini": mock_gemini, "claude": mock_claude}
 
 
@@ -44,6 +48,7 @@ class TestFullPipeline:
         assert "text" in page_result
         assert "confidence" in page_result
         assert "regions" in page_result
+        assert "method" in page_result
 
     def test_result_has_page_number(self, mock_ocr):
         result = process_pdf(str(FIXTURES_DIR / "multi_page.pdf"))
@@ -80,6 +85,18 @@ class TestPipelineConfig:
         )
         assert len(result) == 1
 
+    @patch("arabic_ocr.pipeline.extract_native_pdf")
+    def test_native_pdf_path_used_when_text_layer_exists(self, mock_native, mock_ocr):
+        mock_native.return_value = [
+            MagicMock(page=0, text="كشف حساب 123", has_text_layer=True, source="native")
+        ]
+        result = process_pdf(
+            str(FIXTURES_DIR / "single_page.pdf"),
+            config={"verify_with_ocr": False},
+        )
+        assert result[0]["method"] == "native_pdf"
+        assert "123" in result[0]["text"]
+
 
 class TestErrorRecovery:
 
@@ -93,7 +110,6 @@ class TestErrorRecovery:
 
     @patch("arabic_ocr.ocr_engines._call_gemini")
     def test_ocr_failure_doesnt_crash(self, mock_gemini):
-        """If OCR fails on a region, pipeline should continue."""
         mock_gemini.return_value = {"text": "", "success": False, "error": "API error"}
         result = process_pdf(str(FIXTURES_DIR / "single_page.pdf"))
         assert isinstance(result, list)

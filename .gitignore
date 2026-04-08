@@ -15,3 +15,4 @@ env/
 htmlcov/
 *.so
 .mypy_cache/
+temp/

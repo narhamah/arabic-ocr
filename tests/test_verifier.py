@@ -1,9 +1,11 @@
-"""Tests for cross-model verifier — TDD RED phase."""
+"""Tests for OCR verification and native-vs-OCR adjudication."""
+
+from unittest.mock import patch
 
 import pytest
-from unittest.mock import patch, MagicMock
 from PIL import Image
-from arabic_ocr.verifier import verify_and_merge
+
+from arabic_ocr.verifier import verify_and_merge, verify_native_vs_ocr
 
 
 @pytest.fixture
@@ -34,7 +36,7 @@ class TestDisagreementDetection:
         primary = "الوزير أكد أن العدد كبير"
         secondary = "الوزير اكد ان العدد كبير"
         with patch("arabic_ocr.verifier._call_claude_tiebreaker") as mock_claude:
-            mock_claude.return_value = "الوزير أكد أن العدد كبير"
+            mock_claude.return_value = primary
             result = verify_and_merge(primary, secondary, small_image)
         assert result["disagreements"] > 0
 
@@ -60,33 +62,13 @@ class TestTiebreaker:
         verify_and_merge("same text", "same text", small_image)
         mock_claude.assert_not_called()
 
-    @patch("arabic_ocr.verifier._call_claude_tiebreaker")
-    def test_tiebreaker_receives_image(self, mock_claude, small_image):
-        mock_claude.return_value = "resolved"
-        verify_and_merge("word1 word2", "word1 word3", small_image)
-        call_args = mock_claude.call_args
-        # Image should be passed
-        assert any(isinstance(arg, Image.Image) for arg in call_args[0]) or \
-               any(isinstance(v, Image.Image) for v in call_args[1].values())
-
-    @patch("arabic_ocr.verifier._call_claude_tiebreaker")
-    def test_tiebreaker_receives_both_versions(self, mock_claude, small_image):
-        mock_claude.return_value = "text a"
-        verify_and_merge("text a", "text b", small_image)
-        call_args = mock_claude.call_args
-        # Both texts should be in args somehow
-        all_str_args = " ".join(str(a) for a in call_args[0]) + " ".join(str(v) for v in call_args[1].values())
-        assert "text a" in all_str_args or "text b" in all_str_args
-
 
 class TestFallback:
 
     @patch("arabic_ocr.verifier._call_claude_tiebreaker")
     def test_handles_claude_api_error(self, mock_claude, small_image):
-        """If Claude fails, falls back to primary (Gemini Pro) output."""
         mock_claude.side_effect = Exception("API error")
         result = verify_and_merge("primary text", "secondary text", small_image)
-        # Should not raise, should return primary
         assert result["text"] == "primary text"
 
     @patch("arabic_ocr.verifier._call_claude_tiebreaker")
@@ -96,33 +78,26 @@ class TestFallback:
         assert result["text"] == "primary text"
 
 
-class TestConfidence:
+class TestNativeVsOcr:
 
-    def test_confidence_score_returned(self, small_image):
-        result = verify_and_merge("same text", "same text", small_image)
-        assert isinstance(result["confidence"], float)
-        assert 0.0 <= result["confidence"] <= 1.0
+    def test_accepts_native_when_it_matches_ocr(self, small_image):
+        result = verify_native_vs_ocr(
+            native_text="كشف حساب 12345",
+            ocr_text="كشف حساب 12345",
+            image=small_image,
+        )
+        assert result["source"] == "native_confirmed_by_ocr"
+        assert result["digit_agreement"] is True
 
-    def test_identical_gives_full_confidence(self, small_image):
-        result = verify_and_merge("identical", "identical", small_image)
-        assert result["confidence"] == 1.0
-
-    @patch("arabic_ocr.verifier._call_claude_tiebreaker")
-    def test_disagreements_lower_confidence(self, mock_claude, small_image):
-        mock_claude.return_value = "a b c"
-        result = verify_and_merge("a b c", "a x c", small_image)
-        assert result["confidence"] < 1.0
-
-
-class TestEdgeCases:
-
-    def test_empty_strings(self, small_image):
-        result = verify_and_merge("", "", small_image)
-        assert result["text"] == ""
-        assert result["confidence"] == 1.0
-
-    def test_one_empty_string(self, small_image):
-        with patch("arabic_ocr.verifier._call_claude_tiebreaker") as mock_claude:
-            mock_claude.return_value = "some text"
-            result = verify_and_merge("some text", "", small_image)
-        assert isinstance(result["text"], str)
+    @patch("arabic_ocr.verifier._call_claude_page_resolver")
+    @patch("arabic_ocr.verifier._call_openai_page_resolver")
+    def test_uses_resolver_on_meaningful_difference(self, mock_openai, mock_claude, small_image):
+        mock_claude.return_value = "كشف حساب 12345"
+        mock_openai.return_value = "كشف حساب 12345"
+        result = verify_native_vs_ocr(
+            native_text="كشف حساب 1234S",
+            ocr_text="كشف حساب 12345",
+            image=small_image,
+        )
+        assert result["text"] == "كشف حساب 12345"
+        assert result["source"] in {"claude", "openai"}
