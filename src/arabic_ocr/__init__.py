@@ -1,3 +1,7 @@
-"""High-accuracy Arabic OCR pipeline for scanned PDFs."""
+"""Arabic OCR pipeline for scanned legal documents."""
 
-__version__ = "0.1.0"
+from arabic_ocr.pipeline import process_pdf, process_pdf_document
+
+__all__ = ["process_pdf", "process_pdf_document", "__version__"]
+
+__version__ = "0.2.0"

@@ -11,7 +11,35 @@ from pathlib import Path
 from PIL import Image
 from click.testing import CliRunner
 
+from arabic_ocr.models import BoundingBox, OCRBlock, OCRDocument, OCRLine, OCRPage, OCRSpan
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+def _sample_document() -> OCRDocument:
+    page = OCRPage(
+        page_number=0,
+        width=800,
+        height=1000,
+        source_kind="scan",
+        blocks=[
+            OCRBlock(
+                block_type="text",
+                bbox=BoundingBox(0, 0, 800, 1000),
+                reading_order=0,
+                confidence=1.0,
+                engine_id="mock",
+                lines=[
+                    OCRLine(
+                        spans=[OCRSpan(text="Output", confidence=1.0, engine_id="mock")],
+                        confidence=1.0,
+                        engine_id="mock",
+                    )
+                ],
+            )
+        ],
+    )
+    return OCRDocument(source_pdf=str(FIXTURES_DIR / "single_page.pdf"), dpi=400, pages=[page])
 
 
 # ---------------------------------------------------------------------------
@@ -21,14 +49,12 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 class TestCLICoverageGaps:
 
-    @patch("arabic_ocr.pipeline.process_pdf")
+    @patch("arabic_ocr.pipeline.process_pdf_document")
     def test_cli_with_pages_option(self, mock_process):
         """Cover line 40: config['pages'] = _parse_pages(pages)"""
         from arabic_ocr.cli import main
 
-        mock_process.return_value = [
-            {"page": 0, "text": "Page 1", "confidence": 1.0, "regions": 1}
-        ]
+        mock_process.return_value = _sample_document()
         runner = CliRunner()
         result = runner.invoke(main, [
             str(FIXTURES_DIR / "multi_page.pdf"), "-p", "1-2"
@@ -37,7 +63,7 @@ class TestCLICoverageGaps:
         call_config = mock_process.call_args[1].get("config") or mock_process.call_args[0][1]
         assert "pages" in call_config
 
-    @patch("arabic_ocr.pipeline.process_pdf")
+    @patch("arabic_ocr.pipeline.process_pdf_document")
     def test_cli_process_raises_exception(self, mock_process):
         """Cover lines 48-50: except Exception -> sys.exit(1)"""
         from arabic_ocr.cli import main
@@ -48,15 +74,13 @@ class TestCLICoverageGaps:
         assert result.exit_code != 0
         assert "PDF corrupt" in result.output or "PDF corrupt" in (result.stderr_bytes or b"").decode("utf-8", errors="replace")
 
-    @patch("arabic_ocr.pipeline.process_pdf")
-    def test_cli_verbose_with_output_file(self, mock_process, tmp_path):
+    @patch("arabic_ocr.pipeline.process_pdf_document")
+    def test_cli_verbose_with_output_file(self, mock_process, repo_tmp_path):
         """Cover line 60: verbose echo of output file path."""
         from arabic_ocr.cli import main
 
-        mock_process.return_value = [
-            {"page": 0, "text": "Output", "confidence": 1.0, "regions": 1}
-        ]
-        out_file = tmp_path / "out.txt"
+        mock_process.return_value = _sample_document()
+        out_file = repo_tmp_path / "out.txt"
         runner = CliRunner()
         result = runner.invoke(main, [
             str(FIXTURES_DIR / "single_page.pdf"),
@@ -64,7 +88,7 @@ class TestCLICoverageGaps:
             "-v",
         ])
         assert result.exit_code == 0
-        assert out_file.read_text() == "Output"
+        assert "Output" in out_file.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +100,9 @@ class TestLayoutYOLOPath:
 
     def test_yolo_detection_with_mock_yolo(self):
         """Cover lines 43-69 by mocking doclayout_yolo and huggingface_hub."""
-        from arabic_ocr.layout import _try_yolo_detection
+        from arabic_ocr.layout import _load_yolo_model, _try_yolo_detection
+
+        _load_yolo_model.cache_clear()
 
         mock_box = MagicMock()
         mock_box.xyxy = [MagicMock()]
@@ -115,7 +141,9 @@ class TestLayoutYOLOPath:
 
     def test_yolo_detection_handles_exception(self):
         """Cover line 68-69: YOLO exception returns empty list."""
-        from arabic_ocr.layout import _try_yolo_detection
+        from arabic_ocr.layout import _load_yolo_model, _try_yolo_detection
+
+        _load_yolo_model.cache_clear()
 
         mock_yolo_module = MagicMock()
         mock_hf_module = MagicMock()
@@ -319,18 +347,18 @@ class TestPreprocessorCoverageGaps:
 
 class TestUtilsCoverageGaps:
 
-    def test_load_env_when_file_exists(self, tmp_path, monkeypatch):
+    def test_load_env_when_file_exists(self, repo_tmp_path, monkeypatch):
         """Cover line 11: .env file exists and gets loaded."""
-        env_file = tmp_path / ".env"
+        env_file = repo_tmp_path / ".env"
         env_file.write_text("TEST_ARABIC_OCR_VAR=hello_world\n")
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.chdir(repo_tmp_path)
         from arabic_ocr.utils import load_env
         load_env()
         assert os.getenv("TEST_ARABIC_OCR_VAR") == "hello_world"
 
-    def test_load_env_when_file_missing(self, tmp_path, monkeypatch):
+    def test_load_env_when_file_missing(self, repo_tmp_path, monkeypatch):
         """Ensure load_env doesn't crash when .env is absent."""
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.chdir(repo_tmp_path)
         from arabic_ocr.utils import load_env
         load_env()  # Should not raise
 
@@ -456,53 +484,76 @@ class TestVerifierCoverageGaps:
 class TestOCREnginesCoverageGaps:
 
     def test_call_gemini_no_key_returns_error(self, monkeypatch):
-        """Cover lines 84-85: GEMINI_API_KEY not set."""
+        """GEMINI_API_KEY missing returns an error payload."""
         from arabic_ocr.ocr_engines import _call_gemini
 
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        mock_genai = MagicMock()
-
-        import sys
-        with patch.dict(sys.modules, {"google.generativeai": mock_genai}):
-            img = Image.new("RGB", (100, 100), "white")
-            result = _call_gemini(image=img, model="test", prompt="test")
+        img = Image.new("RGB", (100, 100), "white")
+        result = _call_gemini(image=img, model="test", prompt="test")
         assert result["success"] is False
         assert "GEMINI_API_KEY" in result["error"]
 
     def test_call_gemini_exception_returns_error(self, monkeypatch):
-        """Cover lines 95-96: exception during API call."""
+        """Exceptions from google.genai are surfaced as error payloads."""
         from arabic_ocr.ocr_engines import _call_gemini
 
         monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
 
-        mock_genai = MagicMock()
-        mock_model = MagicMock()
-        mock_model.generate_content.side_effect = Exception("Network error")
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = Exception("Network error")
+        mock_genai_module = MagicMock()
+        mock_genai_module.Client.return_value = mock_client
+        mock_types_module = MagicMock()
+        mock_types_module.Part.from_bytes.return_value = "image-part"
+        mock_genai_module.types = mock_types_module
+        mock_google_package = MagicMock()
+        mock_google_package.genai = mock_genai_module
 
         import sys
-        with patch.dict(sys.modules, {"google.generativeai": mock_genai}):
+        with patch.dict(sys.modules, {
+            "google": mock_google_package,
+            "google.genai": mock_genai_module,
+            "google.genai.types": mock_types_module,
+        }):
             img = Image.new("RGB", (100, 100), "white")
             result = _call_gemini(image=img, model="test", prompt="test")
         assert result["success"] is False
         assert "Network error" in result["error"]
 
     def test_call_gemini_response_no_text(self, monkeypatch):
-        """Cover line 91: response.text is None/empty."""
+        """Empty response text still returns a success payload."""
         from arabic_ocr.ocr_engines import _call_gemini
 
         monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
 
         mock_response = MagicMock()
         mock_response.text = None
-        mock_model = MagicMock()
-        mock_model.generate_content.return_value = mock_response
-        mock_genai = MagicMock()
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
+        mock_genai_module = MagicMock()
+        mock_genai_module.Client.return_value = mock_client
+        mock_types_module = MagicMock()
+        mock_types_module.Part.from_bytes.return_value = "image-part"
+        mock_genai_module.types = mock_types_module
+        mock_google_package = MagicMock()
+        mock_google_package.genai = mock_genai_module
 
         import sys
-        with patch.dict(sys.modules, {"google.generativeai": mock_genai}):
+        with patch.dict(sys.modules, {
+            "google": mock_google_package,
+            "google.genai": mock_genai_module,
+            "google.genai.types": mock_types_module,
+        }):
             img = Image.new("RGB", (100, 100), "white")
             result = _call_gemini(image=img, model="test", prompt="test")
         assert result["success"] is True
         assert result["text"] == ""
+
+    def test_call_openai_missing_key_returns_error(self, monkeypatch):
+        from arabic_ocr.ocr_engines import _call_openai
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        img = Image.new("RGB", (100, 100), "white")
+        result = _call_openai(image=img, model="gpt-4.1-mini", prompt="test")
+        assert result["success"] is False
+        assert "OPENAI_API_KEY" in result["error"]

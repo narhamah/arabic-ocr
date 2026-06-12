@@ -1,4 +1,4 @@
-"""Verification and adjudication helpers for OCR and hybrid extraction."""
+"""Cross-model verification with OpenAI-first adjudication and Claude fallback."""
 
 from __future__ import annotations
 
@@ -10,17 +10,16 @@ import re
 
 from PIL import Image
 
+from arabic_ocr.openai_support import create_client, extract_output_text, image_to_data_url, openai_ready
 
-def verify_and_merge(
-    primary: str, secondary: str, image: Image.Image
-) -> dict:
+
+def verify_and_merge(primary: str, secondary: str, image: Image.Image) -> dict:
     """Compare two OCR outputs and resolve disagreements."""
     if not primary and not secondary:
         return {"text": "", "confidence": 1.0, "disagreements": 0, "total_words": 0}
 
     primary_words = primary.split()
     secondary_words = secondary.split()
-
     if primary_words == secondary_words:
         return {
             "text": primary,
@@ -32,7 +31,6 @@ def verify_and_merge(
     matcher = difflib.SequenceMatcher(None, primary_words, secondary_words)
     agreements = []
     disagreements = []
-
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             agreements.extend(primary_words[i1:i2])
@@ -45,10 +43,9 @@ def verify_and_merge(
 
     total_words = max(len(primary_words), len(secondary_words))
     num_disagreements = len(disagreements)
-
     if disagreements:
         try:
-            resolved_text = _call_claude_tiebreaker(
+            resolved_text = _call_tiebreaker(
                 primary=primary,
                 secondary=secondary,
                 disagreements=disagreements,
@@ -81,114 +78,143 @@ def verify_and_merge(
     }
 
 
-def verify_native_vs_ocr(
-    *,
-    native_text: str,
-    ocr_text: str,
-    image: Image.Image,
-) -> dict:
-    """Adjudicate between native PDF extraction and OCR confirmation."""
-    native_clean = native_text.strip()
-    ocr_clean = ocr_text.strip()
+def verify_native_vs_ocr(*, native_text: str, ocr_text: str, image: Image.Image) -> dict:
+    """Adjudicate native PDF text against OCR for a full page."""
+    native_text = native_text or ""
+    ocr_text = ocr_text or ""
+    digit_agreement = _extract_numbers(native_text) == _extract_numbers(ocr_text)
+    similarity = _similarity(native_text, ocr_text)
 
-    if not native_clean and not ocr_clean:
+    if native_text.strip() and (native_text == ocr_text or (similarity >= 0.92 and digit_agreement)):
         return {
-            "text": "",
-            "confidence": 0.0,
-            "source": "empty",
-            "similarity": 1.0,
-            "digit_agreement": True,
+            "text": native_text,
+            "confidence": 1.0 if native_text == ocr_text else max(0.85, similarity),
+            "source": "native_confirmed_by_ocr",
+            "digit_agreement": digit_agreement,
+            "similarity": similarity,
         }
-    if native_clean and not ocr_clean:
+
+    if not native_text.strip() and ocr_text.strip():
         return {
-            "text": native_clean,
+            "text": ocr_text,
+            "confidence": 0.75,
+            "source": "ocr_only",
+            "digit_agreement": digit_agreement,
+            "similarity": similarity,
+        }
+
+    if native_text.strip() and not ocr_text.strip():
+        return {
+            "text": native_text,
             "confidence": 0.75,
             "source": "native_only",
-            "similarity": 0.0,
-            "digit_agreement": False,
-        }
-    if ocr_clean and not native_clean:
-        return {
-            "text": ocr_clean,
-            "confidence": 0.6,
-            "source": "ocr_only",
-            "similarity": 0.0,
-            "digit_agreement": False,
-        }
-
-    similarity = _similarity(native_clean, ocr_clean)
-    digit_agreement = _extract_numbers(native_clean) == _extract_numbers(ocr_clean)
-    len_ratio = len(ocr_clean) / max(len(native_clean), 1)
-
-    if similarity >= 0.985 and digit_agreement:
-        return {
-            "text": native_clean,
-            "confidence": 0.99,
-            "source": "native_confirmed_by_ocr",
-            "similarity": similarity,
-            "digit_agreement": True,
-        }
-
-    # A real text layer is usually more trustworthy than OCR when the two
-    # outputs diverge heavily. Do not let image models rewrite the page unless
-    # the OCR is close enough to act as corroboration rather than invention.
-    if similarity < 0.75 or len_ratio < 0.85 or len_ratio > 1.15:
-        return {
-            "text": native_clean,
-            "confidence": 0.9,
-            "source": "native_preferred_large_mismatch",
-            "similarity": similarity,
             "digit_agreement": digit_agreement,
-        }
-
-    resolved_candidates = [
-        ("native", native_clean),
-        ("ocr", ocr_clean),
-    ]
-
-    claude_text = _call_claude_page_resolver(
-        native_text=native_clean,
-        ocr_text=ocr_clean,
-        image=image,
-    )
-    claude_clean = claude_text.strip() if claude_text else ""
-    if claude_clean:
-        resolved_candidates.append(("claude", claude_clean))
-
-    openai_text = _call_openai_page_resolver(
-        native_text=native_clean,
-        ocr_text=ocr_clean,
-        image=image,
-    )
-    openai_clean = openai_text.strip() if openai_text else ""
-    if openai_clean:
-        resolved_candidates.append(("openai", openai_clean))
-
-    if claude_clean and openai_clean and claude_clean == openai_clean:
-        return {
-            "text": claude_clean,
-            "confidence": 0.98,
-            "source": "claude",
             "similarity": similarity,
-            "digit_agreement": _extract_numbers(claude_clean) == _extract_numbers(ocr_clean),
         }
 
-    best_source, best_text = max(
-        resolved_candidates,
-        key=lambda item: _consensus_score(item[1], [text for _name, text in resolved_candidates]),
-    )
-    best_similarity = max(
-        _similarity(best_text, candidate)
-        for _name, candidate in resolved_candidates
+    resolved = _call_openai_page_resolver(native_text=native_text, ocr_text=ocr_text, image=image)
+    if not resolved:
+        resolved = _call_claude_page_resolver(native_text=native_text, ocr_text=ocr_text, image=image)
+    if resolved:
+        return {
+            "text": resolved,
+            "confidence": 0.8,
+            "source": "page_resolver",
+            "digit_agreement": digit_agreement,
+            "similarity": similarity,
+        }
+
+    native_score = _consensus_score(native_text, [ocr_text])
+    ocr_score = _consensus_score(ocr_text, [native_text])
+    if ocr_score > native_score and ocr_text.strip():
+        return {
+            "text": ocr_text,
+            "confidence": max(0.4, min(0.75, similarity)),
+            "source": "ocr_preferred",
+            "digit_agreement": digit_agreement,
+            "similarity": similarity,
+        }
+    return {
+        "text": native_text,
+        "confidence": max(0.4, min(0.75, similarity)),
+        "source": "native_preferred",
+        "digit_agreement": digit_agreement,
+        "similarity": similarity,
+    }
+
+
+def _call_tiebreaker(
+    *,
+    primary: str,
+    secondary: str,
+    disagreements: list[dict],
+    image: Image.Image,
+) -> str | None:
+    """Use OpenAI first, then Claude if available."""
+    if openai_ready():
+        resolved = _call_openai_tiebreaker(
+            primary=primary,
+            secondary=secondary,
+            disagreements=disagreements,
+            image=image,
+        )
+        if resolved:
+            return resolved
+    return _call_claude_tiebreaker(
+        primary=primary,
+        secondary=secondary,
+        disagreements=disagreements,
+        image=image,
     )
 
-    return {
-        "text": best_text,
-        "confidence": min(0.98, max(0.55, best_similarity)),
-        "source": best_source,
-        "similarity": similarity,
-        "digit_agreement": digit_agreement,
-    }
+
+def _call_openai_tiebreaker(
+    *,
+    primary: str,
+    secondary: str,
+    disagreements: list[dict],
+    image: Image.Image,
+) -> str | None:
+    """Call OpenAI to resolve OCR disagreements."""
+    if not openai_ready():
+        return None
+
+    disagreement_lines = [
+        f'- A: "{item["primary"]}" vs B: "{item["secondary"]}"'
+        for item in disagreements
+    ]
+    disagreement_text = "\n".join(disagreement_lines)
+    prompt = f"""Two OCR systems read this Arabic legal document image differently.
+
+System A read:
+{primary}
+
+System B read:
+{secondary}
+
+Focus only on the disputed spans below and use the image to choose the correct reading.
+Disputes:
+{disagreement_text}
+
+Return ONLY the complete corrected text.
+Do not paraphrase.
+Do not add commentary.
+Do not add diacritics unless clearly visible."""
+
+    client = create_client()
+    model = os.getenv("OPENAI_TIEBREAKER_MODEL", "gpt-4.1-mini")
+    response = client.responses.create(
+        model=model,
+        input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": image_to_data_url(image)},
+            ],
+        }],
+    )
+    resolved_text = extract_output_text(response)
+    return resolved_text or None
 
 
 def _call_claude_tiebreaker(
@@ -199,22 +225,26 @@ def _call_claude_tiebreaker(
     image: Image.Image,
 ) -> str | None:
     """Call Claude to resolve OCR disagreements."""
-    import anthropic
-
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         return None
 
-    image_b64 = _image_to_base64_png(image)
+    import anthropic
 
-    disagreement_lines = []
-    for disagreement in disagreements:
-        disagreement_lines.append(
-            f'  System A: "{disagreement["primary"]}" vs System B: "{disagreement["secondary"]}"'
-        )
+    from base64 import b64encode
+    from io import BytesIO
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    image_b64 = b64encode(buffer.getvalue()).decode("utf-8")
+
+    disagreement_lines = [
+        f'  System A: "{item["primary"]}" vs System B: "{item["secondary"]}"'
+        for item in disagreements
+    ]
     disagreement_text = "\n".join(disagreement_lines)
 
-    prompt = f"""Two OCR systems read this Arabic image differently.
+    prompt = f"""Two OCR systems read this Arabic legal document image differently.
 
 System A read: {primary}
 System B read: {secondary}

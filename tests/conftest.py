@@ -1,11 +1,21 @@
 """Shared test fixtures."""
 
-import pytest
-from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
+import sys
+import tempfile
+import uuid
+
 import numpy as np
+from PIL import Image, ImageDraw
+import pytest
+
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+TMP_ROOT = Path(tempfile.gettempdir()) / "arabic_ocr_tests"
+TMP_ROOT.mkdir(exist_ok=True)
 
 
 @pytest.fixture
@@ -47,3 +57,11 @@ def two_column_image() -> Image.Image:
 def rotated_image(sample_arabic_image: Image.Image) -> Image.Image:
     """Create a slightly rotated test image."""
     return sample_arabic_image.rotate(5, expand=True, fillcolor="white")
+
+
+@pytest.fixture
+def repo_tmp_path() -> Path:
+    """Create a writable temporary directory inside the repository."""
+    path = TMP_ROOT / f"case_{uuid.uuid4().hex}"
+    path.mkdir(parents=True, exist_ok=False)
+    yield path

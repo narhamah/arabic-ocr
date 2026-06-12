@@ -11,8 +11,28 @@ build/
 venv/
 env/
 .pytest_cache/
+.pytest_tmp/
+pytest-cache-files-*/
+tests/.tmp/
+tests_tmp/
 .coverage
 htmlcov/
 *.so
 .mypy_cache/
-temp/
+
+# Local OCR inputs, model data, and generated artifacts
+.tessdata/
+*.traineddata
+*.pdf
+!tests/fixtures/*.pdf
+out/
+out_*/
+source/
+CMA/
+precedents/
+Boubyan civil claim/
+CBK Contract/
+eos-case-bpc/
+**/ocr_audit_artifacts/
+**/clean_md/
+**/clean_txt/

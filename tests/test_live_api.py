@@ -13,6 +13,8 @@ from PIL import Image, ImageDraw
 
 from arabic_ocr.utils import load_env
 
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
+
 # Load .env at import time so keys are available for skipif checks
 load_env()
 

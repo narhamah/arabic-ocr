@@ -1,24 +1,23 @@
 """Stage 1: Image preprocessing for Arabic OCR.
 
-Pipeline: grayscale -> CLAHE -> NLM denoise (h=8) -> Sauvola binarize -> deskew.
-Returns grayscale (not binary) — VLMs work better with grayscale.
+Pipeline: grayscale -> CLAHE -> denoise -> deskew.
+Returns grayscale images; some OCR engines work best from raw imagery while
+classical layout/text detectors benefit from a lightly enhanced view.
 """
 
-import cv2
+from __future__ import annotations
+
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter, ImageOps
+
+try:  # pragma: no cover - depends on optional extra
+    import cv2
+except ImportError:  # pragma: no cover - exercised indirectly in test env
+    cv2 = None
 
 
 def preprocess(image: Image.Image) -> Image.Image:
-    """Preprocess an image for OCR.
-
-    Args:
-        image: Input PIL Image (any mode: RGB, RGBA, L).
-
-    Returns:
-        Preprocessed grayscale PIL Image.
-    """
-    # Convert to RGB if needed, then to grayscale
+    """Preprocess an image for OCR/layout detection."""
     if image.mode == "RGBA":
         image = image.convert("RGB")
     if image.mode != "L":
@@ -26,54 +25,63 @@ def preprocess(image: Image.Image) -> Image.Image:
     else:
         gray = np.array(image)
 
-    # CLAHE contrast enhancement
     gray = _apply_clahe(gray)
-
-    # NLM denoise with h=8 max (preserves Arabic dots)
     gray = _denoise(gray)
-
-    # Deskew
     gray = _deskew(gray)
 
     return Image.fromarray(gray, mode="L")
 
 
 def _apply_clahe(gray: np.ndarray) -> np.ndarray:
-    """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)."""
+    """Apply local contrast enhancement."""
+    if cv2 is None:
+        pil_image = Image.fromarray(gray, mode="L")
+        enhanced = ImageOps.autocontrast(pil_image, cutoff=1)
+        return np.array(enhanced, dtype=np.uint8)
+
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     return clahe.apply(gray)
 
 
 def _denoise(gray: np.ndarray) -> np.ndarray:
-    """Apply Non-Local Means denoising with h=8.
+    """Denoise while preserving small Arabic dots."""
+    if cv2 is None:
+        pil_image = Image.fromarray(gray, mode="L")
+        denoised = pil_image.filter(ImageFilter.MedianFilter(size=3))
+        return np.array(denoised, dtype=np.uint8)
 
-    CRITICAL: h=8 maximum. Higher values destroy Arabic dots
-    (15 letters distinguished only by dots).
-    """
-    return cv2.fastNlMeansDenoising(gray, h=8, templateWindowSize=7, searchWindowSize=21)
+    return cv2.fastNlMeansDenoising(
+        gray,
+        h=8,
+        templateWindowSize=7,
+        searchWindowSize=21,
+    )
 
 
 def _deskew(gray: np.ndarray) -> np.ndarray:
-    """Detect and correct skew angle using Hough line transform."""
-    # Binarize for angle detection
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    """Detect and correct skew angle when OpenCV is available."""
+    if cv2 is None:
+        return gray
 
-    # Find lines using Hough transform
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     lines = cv2.HoughLinesP(
-        binary, 1, np.pi / 180, threshold=100, minLineLength=100, maxLineGap=10
+        binary,
+        1,
+        np.pi / 180,
+        threshold=100,
+        minLineLength=100,
+        maxLineGap=10,
     )
 
     if lines is None or len(lines) == 0:
         return gray
 
-    # Calculate median angle from detected lines
     angles = []
     for line in lines:
         x1, y1, x2, y2 = line[0]
         if x2 - x1 == 0:
             continue
         angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
-        # Only consider near-horizontal lines (within 15 degrees)
         if abs(angle) < 15:
             angles.append(angle)
 
@@ -81,19 +89,16 @@ def _deskew(gray: np.ndarray) -> np.ndarray:
         return gray
 
     median_angle = np.median(angles)
-
-    # Only correct if skew is significant (> 0.5 degrees)
     if abs(median_angle) < 0.5:
         return gray
 
-    # Rotate to correct skew
-    h, w = gray.shape
-    center = (w // 2, h // 2)
+    height, width = gray.shape
+    center = (width // 2, height // 2)
     rotation_matrix = cv2.getRotationMatrix2D(center, median_angle, 1.0)
-    corrected = cv2.warpAffine(
-        gray, rotation_matrix, (w, h),
+    return cv2.warpAffine(
+        gray,
+        rotation_matrix,
+        (width, height),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REPLICATE,
     )
-
-    return corrected

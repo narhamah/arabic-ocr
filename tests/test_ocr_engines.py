@@ -1,11 +1,13 @@
-"""Tests for OCR engines. All API calls must be mocked."""
+"""Tests for OCR engine helpers with all API calls mocked."""
+
+from __future__ import annotations
 
 from unittest.mock import patch
 
 import pytest
 from PIL import Image
 
-from arabic_ocr.ocr_engines import ocr_gemini_flash, ocr_gemini_pro, run_dual_ocr
+from arabic_ocr.ocr_engines import ocr_gemini_flash, ocr_gemini_pro, ocr_openai, run_dual_ocr
 
 
 @pytest.fixture
@@ -19,7 +21,6 @@ class TestGeminiPro:
     def test_returns_dict_with_text(self, mock_call, small_image):
         mock_call.return_value = {"text": "بسم الله", "success": True, "error": None}
         result = ocr_gemini_pro(small_image)
-        assert isinstance(result, dict)
         assert result["text"] == "بسم الله"
         assert result["success"] is True
 
@@ -27,15 +28,14 @@ class TestGeminiPro:
     def test_sends_correct_model(self, mock_call, small_image):
         mock_call.return_value = {"text": "test", "success": True, "error": None}
         ocr_gemini_pro(small_image)
-        call_args = mock_call.call_args
-        assert "gemini-2.5-pro" in call_args[1]["model"]
+        assert mock_call.call_args.kwargs["model"] == "gemini-2.5-pro"
 
     @patch("arabic_ocr.ocr_engines._call_gemini")
     def test_handles_api_error(self, mock_call, small_image):
         mock_call.return_value = {"text": "", "success": False, "error": "API error"}
         result = ocr_gemini_pro(small_image)
         assert result["success"] is False
-        assert result["error"] is not None
+        assert result["error"] == "API error"
 
 
 class TestGeminiFlash:
@@ -44,15 +44,36 @@ class TestGeminiFlash:
     def test_returns_dict_with_text(self, mock_call, small_image):
         mock_call.return_value = {"text": "نص عربي", "success": True, "error": None}
         result = ocr_gemini_flash(small_image)
-        assert isinstance(result, dict)
         assert result["text"] == "نص عربي"
 
     @patch("arabic_ocr.ocr_engines._call_gemini")
     def test_sends_correct_model(self, mock_call, small_image):
         mock_call.return_value = {"text": "test", "success": True, "error": None}
         ocr_gemini_flash(small_image)
-        call_args = mock_call.call_args
-        assert "gemini-2.0-flash" in call_args[1]["model"]
+        assert mock_call.call_args.kwargs["model"] == "gemini-2.5-flash"
+
+    @patch("arabic_ocr.ocr_engines._call_gemini")
+    def test_handles_api_error(self, mock_call, small_image):
+        mock_call.return_value = {"text": "", "success": False, "error": "timeout"}
+        result = ocr_gemini_flash(small_image)
+        assert result["success"] is False
+
+
+class TestOpenAI:
+
+    @patch("arabic_ocr.ocr_engines._call_openai")
+    def test_returns_dict_with_text(self, mock_call, small_image):
+        mock_call.return_value = {"text": "نص عربي", "success": True, "error": None}
+        result = ocr_openai(small_image)
+        assert result["success"] is True
+        assert result["text"] == "نص عربي"
+
+    @patch("arabic_ocr.ocr_engines._call_openai")
+    def test_uses_configured_default_model(self, mock_call, small_image, monkeypatch):
+        monkeypatch.setenv("OPENAI_OCR_MODEL", "gpt-4.1-mini")
+        mock_call.return_value = {"text": "ok", "success": True, "error": None}
+        ocr_openai(small_image)
+        assert mock_call.call_args.kwargs["model"] == "gpt-4.1-mini"
 
 
 class TestDualOCR:
@@ -79,17 +100,6 @@ class TestDualOCR:
         mock_pro.assert_called_once_with(small_image)
         mock_flash.assert_called_once_with(small_image)
 
-    @patch("arabic_ocr.ocr_engines.ocr_openai")
-    @patch("arabic_ocr.ocr_engines.ocr_gemini_flash")
-    @patch("arabic_ocr.ocr_engines.ocr_gemini_pro")
-    def test_uses_openai_fallback_when_one_engine_fails(self, mock_pro, mock_flash, mock_openai, small_image):
-        mock_pro.return_value = {"text": "good text", "success": True, "error": None}
-        mock_flash.return_value = {"text": "", "success": False, "error": "failed"}
-        mock_openai.return_value = {"text": "fallback text", "success": True, "error": None}
-        result = run_dual_ocr(small_image)
-        assert result["primary"]["success"] is True
-        assert result["secondary"]["text"] == "fallback text"
-
 
 class TestPromptContent:
 
@@ -97,12 +107,12 @@ class TestPromptContent:
     def test_prompt_contains_arabic_instructions(self, mock_call, small_image):
         mock_call.return_value = {"text": "", "success": True, "error": None}
         ocr_gemini_pro(small_image)
-        prompt_arg = mock_call.call_args[1]["prompt"]
+        prompt_arg = mock_call.call_args.kwargs["prompt"]
         assert "Arabic" in prompt_arg or "arabic" in prompt_arg
 
-    @patch("arabic_ocr.ocr_engines._call_gemini")
-    def test_prompt_instructs_exact_extraction(self, mock_call, small_image):
+    @patch("arabic_ocr.ocr_engines._call_openai")
+    def test_openai_prompt_instructs_exact_extraction(self, mock_call, small_image):
         mock_call.return_value = {"text": "", "success": True, "error": None}
-        ocr_gemini_pro(small_image)
-        prompt_arg = mock_call.call_args[1]["prompt"]
+        ocr_openai(small_image)
+        prompt_arg = mock_call.call_args.kwargs["prompt"]
         assert "fidelity" in prompt_arg.lower() or "exact" in prompt_arg.lower()

@@ -1,83 +1,101 @@
-"""Arabic text normalization for OCR post-processing.
+"""Arabic text normalization helpers."""
 
-Applies transformations in strict order:
-1. NFKC Unicode normalization
-2. Strip BiDi control characters
-3. Strip tatweel/kashida
-4. Optionally strip diacritics
-5. Normalize Alef variants
-6. Normalize Alef Maksura -> Yeh
-7. Eastern -> Western numerals
-8. Collapse whitespace
-"""
+from __future__ import annotations
 
 import re
 import unicodedata
 
-# BiDi control characters to strip
 _BIDI_CHARS = set(
-    "\u200B\u200C\u200D\u200E\u200F"  # zero-width and directional marks
-    "\u202A\u202B\u202C\u202D\u202E"  # bidi embedding/override
-    "\u2066\u2067\u2068\u2069"  # bidi isolate
-    "\uFEFF"  # BOM / zero-width no-break space
+    "\u200B\u200C\u200D\u200E\u200F"
+    "\u202A\u202B\u202C\u202D\u202E"
+    "\u2066\u2067\u2068\u2069"
+    "\uFEFF"
 )
-
-# Arabic diacritics (tashkeel/harakat) Unicode ranges
-_DIACRITICS_RE = re.compile(
-    "[\u064B-\u065F\u0610-\u061A\u0670\u06D6-\u06ED]"
-)
-
-# Alef variants -> bare Alef
+_DIACRITICS_RE = re.compile("[\u064B-\u065F\u0610-\u061A\u0670\u06D6-\u06ED]")
 _ALEF_VARIANTS = {
-    "\u0623": "\u0627",  # أ Alef with Hamza above
-    "\u0625": "\u0627",  # إ Alef with Hamza below
-    "\u0622": "\u0627",  # آ Alef with Madda above
-    "\u0671": "\u0627",  # ٱ Alef Wasla
+    "\u0623": "\u0627",
+    "\u0625": "\u0627",
+    "\u0622": "\u0627",
+    "\u0671": "\u0627",
 }
-
-# Eastern Arabic numerals -> Western
 _EASTERN_NUMERALS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
-
-# Whitespace collapse
+_SPACE_RE = re.compile(r"[^\S\r\n]+")
+_BLANK_LINE_RE = re.compile(r"\n{3,}")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
 def normalize(text: str, strip_diacritics: bool = True) -> str:
-    """Normalize Arabic OCR output text.
+    """Backwards-compatible normalization used by the legacy pipeline."""
+    return _normalize_text(
+        text,
+        strip_diacritics=strip_diacritics,
+        normalize_alef=True,
+        normalize_alef_maksura=True,
+        convert_eastern_numerals=True,
+        preserve_newlines=False,
+    )
 
-    Args:
-        text: Raw OCR output text.
-        strip_diacritics: If True, remove tashkeel/harakat diacritical marks.
 
-    Returns:
-        Normalized text string.
-    """
+def normalize_faithful(text: str, strip_diacritics: bool = False) -> str:
+    """Minimal normalization for archival text output."""
+    return _normalize_text(
+        text,
+        strip_diacritics=strip_diacritics,
+        normalize_alef=False,
+        normalize_alef_maksura=False,
+        convert_eastern_numerals=False,
+        preserve_newlines=True,
+    )
+
+
+def normalize_llm(
+    text: str,
+    *,
+    strip_diacritics: bool = True,
+    normalize_alef: bool = True,
+    convert_eastern_numerals: bool = True,
+) -> str:
+    """Safer normalization for LLM-ready context output."""
+    return _normalize_text(
+        text,
+        strip_diacritics=strip_diacritics,
+        normalize_alef=normalize_alef,
+        normalize_alef_maksura=normalize_alef,
+        convert_eastern_numerals=convert_eastern_numerals,
+        preserve_newlines=True,
+    )
+
+
+def _normalize_text(
+    text: str,
+    *,
+    strip_diacritics: bool,
+    normalize_alef: bool,
+    normalize_alef_maksura: bool,
+    convert_eastern_numerals: bool,
+    preserve_newlines: bool,
+) -> str:
     if not text:
         return ""
 
-    # 1. NFKC normalization (decomposes presentation forms)
     text = unicodedata.normalize("NFKC", text)
-
-    # 2. Strip BiDi control characters
     text = "".join(ch for ch in text if ch not in _BIDI_CHARS)
-
-    # 3. Strip tatweel/kashida U+0640
     text = text.replace("\u0640", "")
 
-    # 4. Optionally strip diacritics
     if strip_diacritics:
         text = _DIACRITICS_RE.sub("", text)
+    if normalize_alef:
+        text = "".join(_ALEF_VARIANTS.get(ch, ch) for ch in text)
+    if normalize_alef_maksura:
+        text = text.replace("\u0649", "\u064A")
+    if convert_eastern_numerals:
+        text = text.translate(_EASTERN_NUMERALS)
 
-    # 5. Normalize Alef variants
-    text = "".join(_ALEF_VARIANTS.get(ch, ch) for ch in text)
+    if preserve_newlines:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = _SPACE_RE.sub(" ", text)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = _BLANK_LINE_RE.sub("\n\n", text)
+        return text.strip()
 
-    # 6. Normalize Alef Maksura -> Yeh
-    text = text.replace("\u0649", "\u064A")
-
-    # 7. Eastern -> Western numerals
-    text = text.translate(_EASTERN_NUMERALS)
-
-    # 8. Collapse whitespace and strip edges
-    text = _WHITESPACE_RE.sub(" ", text).strip()
-
-    return text
+    return _WHITESPACE_RE.sub(" ", text).strip()
