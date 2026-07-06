@@ -1,0 +1,58 @@
+{
+  "created_at": "2026-06-22T08:39:29",
+  "mode": "local_only_tesseract_latin_blacklist_no_cloud_no_external_llm",
+  "dpi": 350,
+  "variants": [
+    {
+      "variant": "contrast",
+      "psm": 4
+    },
+    {
+      "variant": "contrast",
+      "psm": 6
+    },
+    {
+      "variant": "sharp",
+      "psm": 4
+    },
+    {
+      "variant": "bw200",
+      "psm": 6
+    },
+    {
+      "variant": "bw185",
+      "psm": 6
+    }
+  ],
+  "documents": [
+    {
+      "pdf": "C:\\Users\\narha\\arabic-ocr\\crimprocedure-60-ar.pdf",
+      "output": "C:\\Users\\narha\\arabic-ocr\\crimprocedure-60-ar.clean_arabic.txt",
+      "sha256": "6b4ba4f12d14bf8f353fa0996732941c7b1f902f82b6bcfdf2fe68b8cbfabb40",
+      "page_count": 45,
+      "source_counts": {
+        "bw200/psm=6": 10,
+        "bw185/psm=6": 10,
+        "contrast/psm=4": 13,
+        "sharp/psm=4": 5,
+        "contrast/psm=6": 7
+      },
+      "weak_pages": [],
+      "total_chars": 87439,
+      "total_arabic_chars": 65590
+    },
+    {
+      "pdf": "C:\\Users\\narha\\arabic-ocr\\مرجع قانوني - الإثبات بالقرائن الجزائية.pdf",
+      "output": "C:\\Users\\narha\\arabic-ocr\\مرجع قانوني - الإثبات بالقرائن الجزائية.clean_arabic.txt",
+      "sha256": "996eefcf65217c8e2c22705a0930eaba9bd2a975157a83e72fa0a96eab521127",
+      "page_count": 3,
+      "source_counts": {
+        "sharp/psm=4": 2,
+        "contrast/psm=4": 1
+      },
+      "weak_pages": [],
+      "total_chars": 6158,
+      "total_arabic_chars": 4238
+    }
+  ]
+}
